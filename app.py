@@ -1,77 +1,132 @@
 # app.py
 
 import streamlit as st
-import backend # Import the backend functions (qna_backend_v5)
+import backend # Import the backend functions (qna_backend_v6)
 import os
 from datetime import datetime
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="Q&A Headline Generator (Multi-File)",
-    page_icon="✨"
+    page_title="Q&A Headline Generator (Configurable)",
+    page_icon="✨",
+    layout="wide" # Use wide layout to better accommodate sidebar
 )
 
-# --- App Interface ---
-st.title("✨ Automatic Q&A Headline Generator (Multi-File) ✨")
-st.markdown("""
-Upload one or more Word (.docx) files containing questions and answers in Arabic.
-Enter your Google AI API Key, upload your files, and click the process button.
-The application will process each file, generate headlines (in Arabic) for each Q&A pair,
-and then **merge the results into a single downloadable Word document**.
+# --- Default Prompt Template ---
+# Moved from backend so it can be displayed and edited in the UI
+# Uses .format() style placeholders
+DEFAULT_PROMPT_TEMPLATE = """السؤال التالي وإجابته مقتبسان من وثيقة. قم بإنشاء عنوان قصير ومناسب باللغة العربية يلخص الموضوع الرئيسي لهذا السؤال والإجابة. اجعل العنوان موجزًا وواضحًا. لا تقم بتضمين الكلمات "سؤال" أو "إجابة" في العنوان.
 
-**Expected File Format (for each file):**
-* The app primarily looks for paragraphs starting with **`السؤال`** (or `سؤال`, `Question`).
-* It looks for paragraphs starting with **`الجواب`** (or `جواب`, `Answer`).
-    *(Variations in spacing/punctuation after these words are usually handled)*.
-* Paragraphs following markers are assumed to be part of the Q or A.
-* **Merging Note:** The final merged document will contain the processed content of all uploaded files, separated by page breaks. Complex formatting (headers, footers, etc.) might be lost during merging.
-""")
+السؤال:
+{question}
 
-# --- API Key Input ---
-api_key = st.text_input(
-    "🔑 Enter your Google AI API Key here:",
-    type="password",
-    help="Get your key from Google AI Studio. Your key will not be stored."
-)
+الإجابة:
+{answer}
 
-# Initialize session state
+العنوان المقترح:"""
+
+# --- Initialize Session State ---
 if 'merged_processed_file' not in st.session_state:
     st.session_state.merged_processed_file = None
 if 'processed_filenames' not in st.session_state:
     st.session_state.processed_filenames = []
+# Initialize prompt in session state if it doesn't exist
+if 'current_prompt_template' not in st.session_state:
+    st.session_state.current_prompt_template = DEFAULT_PROMPT_TEMPLATE
 
+# --- Sidebar Configuration ---
+with st.sidebar:
+    st.header("⚙️ Configuration")
+
+    # API Key Input
+    api_key = st.text_input(
+        "🔑 Google AI API Key:",
+        type="password",
+        help="Get your key from Google AI Studio. Your key will not be stored persistently."
+    )
+
+    # Model Selection
+    # Add more models here if available and compatible with the API key/task
+    available_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'] # Example list
+    selected_model = st.selectbox(
+        "🤖 Select Gemini Model:",
+        options=available_models,
+        index=0, # Default to the first model in the list
+        help="Choose the AI model for generating headlines."
+    )
+
+    # Editable Prompt Template
+    st.subheader("📝 Prompt Template")
+    st.markdown("""
+    Edit the prompt used to instruct the AI. Use `{question}` and `{answer}` as placeholders for the actual content.
+    """, help="The text below will be sent to the AI, with the placeholders replaced by the actual question and answer from your document.")
+
+    # Use session state to store and retrieve the current prompt
+    edited_prompt = st.text_area(
+        "Prompt:",
+        value=st.session_state.current_prompt_template,
+        height=300 # Adjust height as needed
+    )
+    # Update session state when the text area changes
+    st.session_state.current_prompt_template = edited_prompt
+
+    if st.button("Reset Prompt to Default"):
+        st.session_state.current_prompt_template = DEFAULT_PROMPT_TEMPLATE
+        st.rerun() # Rerun to update the text area display
+
+# --- Main Page Interface ---
+st.title("✨ Automatic Q&A Headline Generator ✨")
+st.markdown("""
+Upload one or more Word (.docx) files containing questions and answers in Arabic.
+Configure the API Key, Model, and Prompt in the sidebar (←).
+The application will process each file using your settings and merge the results into a single downloadable document.
+
+**Expected File Format (for each file):**
+* Starts with **`السؤال`** (or `سؤال`, `Question`).
+* Starts with **`الجواب`** (or `جواب`, `Answer`).
+* **Merging Note:** Results are merged with page breaks. Complex formatting may be lost.
+""")
 
 # --- File Upload ---
+# Disable upload if API key is missing
 file_uploader_disabled = not bool(api_key)
+if not api_key:
+    st.warning("Please enter your Google AI API Key in the sidebar to enable file upload.")
+
 uploaded_files = st.file_uploader(
-    "Choose one or more Word (.docx) files", # Updated Label
+    "Choose one or more Word (.docx) files",
     type=["docx"],
-    accept_multiple_files=True, # Allow multiple files
-    disabled=file_uploader_disabled
+    accept_multiple_files=True,
+    disabled=file_uploader_disabled,
+    key="file_uploader" # Add a key for potential state management if needed
 )
 
-if not api_key:
-    st.warning("Please enter your Google AI API Key to continue.")
-
 # --- Processing Logic ---
-if uploaded_files and api_key: # Check if list is not empty
+if uploaded_files and api_key: # Check if list is not empty and key provided
     st.success(f"{len(uploaded_files)} file(s) selected.")
     st.session_state.processed_filenames = [f.name for f in uploaded_files]
 
-    if st.button(f"🚀 Process {len(uploaded_files)} File(s) and Merge"): # Updated Button Label
+    if st.button(f"🚀 Process {len(uploaded_files)} File(s) and Merge"):
         st.session_state.merged_processed_file = None # Reset download state
-        processed_docs_list = [] # To store processed doc objects
+        processed_docs_list = []
         files_processed_count = 0
         files_error_count = 0
         total_files = len(uploaded_files)
         overall_progress = st.progress(0)
-        status_messages = st.container() # To display per-file status
+        status_messages = st.container()
 
-        # Configure Gemini API once
+        # Configure Gemini API once (using key from sidebar)
         api_key_configured = backend.configure_gemini(api_key)
         if not api_key_configured:
-            st.error("Failed to configure the Gemini API with the provided key. Please check the key and try again.")
+            st.error("Failed to configure the Gemini API with the provided key. Please check the key in the sidebar.")
             st.stop()
+
+        # Get current prompt from session state (edited via sidebar)
+        current_prompt = st.session_state.current_prompt_template
+        # Get selected model from sidebar widget state
+        current_model = selected_model
+
+        status_messages.info(f"Using Model: `{current_model}`")
 
         # Process each file
         for i, uploaded_file in enumerate(uploaded_files):
@@ -79,79 +134,76 @@ if uploaded_files and api_key: # Check if list is not empty
             status_messages.info(f"Processing file {i+1}/{total_files}: {file_name}...")
             error_occured_this_file = False
             qna_pairs_with_headlines = []
-            modified_doc_object = None # Initialize for this file
+            modified_doc_object = None
 
             try:
-                # 1. Parse the document
+                # 1. Parse
                 qna_pairs, original_paragraphs = backend.parse_qna_pairs(uploaded_file)
                 if not qna_pairs:
-                    status_messages.warning(f"File '{file_name}': Could not find Q&A pairs starting with 'السؤال'/'الجواب'. Skipping headline generation for this file.")
-                    # We might still want to include its original content in merge, or skip entirely
-                    # For now, let's skip adding it to processed_docs_list if no pairs found
-                    error_occured_this_file = True # Consider this an "error" for merging purposes
+                    status_messages.warning(f"File '{file_name}': Could not find Q&A pairs starting with 'السؤال'/'الجواب'. Skipping headline generation.")
+                    error_occured_this_file = True
                 else:
                     status_messages.write(f"File '{file_name}': Found {len(qna_pairs)} potential Q&A pair(s). Generating headlines...")
 
-                # 2. Generate headlines if parsing found pairs
+                # 2. Generate headlines (pass model and prompt)
                 if not error_occured_this_file:
                     headlines_generated_this_file = 0
                     total_pairs_this_file = len(qna_pairs)
                     for pair_idx, pair in enumerate(qna_pairs):
-                        try:
-                            headline = backend.generate_headline(pair['question'], pair['answer'])
-                            if headline and not headline.startswith("خطأ"):
-                                pair['headline'] = headline
-                                qna_pairs_with_headlines.append(pair)
-                                headlines_generated_this_file += 1
-                            else:
-                                status_messages.warning(f"File '{file_name}', Q starting '{pair['question'][:30]}...': Could not generate headline ({headline or 'API Failure'}).")
-                        except Exception as e_gen:
-                            status_messages.error(f"File '{file_name}', Q starting '{pair['question'][:30]}...': Error during headline generation: {e_gen}")
+                        # Call backend with selected model and current prompt
+                        headline = backend.generate_headline(
+                            pair['question'],
+                            pair['answer'],
+                            model_name=current_model,
+                            prompt_template=current_prompt
+                        )
+                        # Check if headline indicates an error (starts with 'خطأ')
+                        if "خطأ" not in headline:
+                            pair['headline'] = headline
+                            qna_pairs_with_headlines.append(pair)
+                            headlines_generated_this_file += 1
+                        else:
+                            # Display the specific error message returned by the backend
+                            status_messages.warning(f"File '{file_name}', Q starting '{pair['question'][:30]}...': {headline}")
 
+                    # Report summary for the file
                     if headlines_generated_this_file == 0 and total_pairs_this_file > 0:
                          status_messages.warning(f"File '{file_name}': No headlines generated successfully.")
-                         # Decide if this constitutes an error preventing merge inclusion
-                         # error_occured_this_file = True
                     elif headlines_generated_this_file < total_pairs_this_file:
                          status_messages.write(f"File '{file_name}': Generated {headlines_generated_this_file}/{total_pairs_this_file} headlines.")
                     else:
                          status_messages.write(f"File '{file_name}': Generated {headlines_generated_this_file} headlines successfully.")
 
 
-                # 3. Create the modified document object if headlines were generated
-                if not error_occured_this_file and qna_pairs_with_headlines:
+                # 3. Create modified doc object (pass pairs that got headlines)
+                if qna_pairs_with_headlines: # Only create if some headlines were successful
                     modified_doc_object = backend.create_modified_document(original_paragraphs, qna_pairs_with_headlines)
                     if modified_doc_object is None:
                          status_messages.error(f"File '{file_name}': Failed to create the modified document structure.")
-                         error_occured_this_file = True
-                elif not error_occured_this_file and not qna_pairs_with_headlines and qna_pairs:
-                     # Case: Pairs found, but NO headlines generated. Should we include original content?
-                     # For now, treat as error for adding headlines, don't create modified doc object.
+                         error_occured_this_file = True # Mark as error if creation fails
+                elif not error_occured_this_file and qna_pairs: # Pairs found but no headlines generated
                      status_messages.warning(f"File '{file_name}': No headlines generated, cannot create modified content section.")
                      error_occured_this_file = True # Treat as error for merging modified content
-                elif error_occured_this_file: # If parsing failed
-                     pass # Already handled
 
 
             except Exception as e_proc:
-                status_messages.error(f"Error processing file '{file_name}': {e_proc}")
+                status_messages.error(f"Critical error processing file '{file_name}': {e_proc}")
                 import traceback
-                traceback.print_exc() # Log full traceback to console/logs
+                traceback.print_exc()
                 error_occured_this_file = True
 
-            # Add successfully processed document object to list for merging
+            # Add successfully processed document object to list
             if not error_occured_this_file and modified_doc_object:
                 processed_docs_list.append(modified_doc_object)
                 files_processed_count += 1
-            elif error_occured_this_file:
+            elif not modified_doc_object: # Covers parsing errors or headline generation failures leading to no doc obj
                 files_error_count += 1
 
-            # Update overall progress
             overall_progress.progress((i + 1) / total_files)
 
-        overall_progress.empty() # Remove progress bar
+        overall_progress.empty()
 
-        # 4. Merge the processed documents if any were successful
+        # 4. Merge documents if any were successful
         if processed_docs_list:
             status_messages.info(f"Merging content from {files_processed_count} successfully processed file(s)...")
             try:
@@ -159,7 +211,7 @@ if uploaded_files and api_key: # Check if list is not empty
                 st.session_state.merged_processed_file = backend.save_doc_to_bytes(merged_doc)
                 st.success(f"Processing complete! Merged content from {files_processed_count} file(s).")
                 if files_error_count > 0:
-                     st.warning(f"{files_error_count} file(s) encountered errors and were not included in the merge.")
+                     st.warning(f"{files_error_count} file(s) encountered errors or had no content to merge.")
                 st.balloons()
             except Exception as e_merge:
                 st.error(f"Error merging documents: {e_merge}")
@@ -171,20 +223,18 @@ if uploaded_files and api_key: # Check if list is not empty
 
 # --- Download Button ---
 if st.session_state.merged_processed_file is not None:
-    # Create a generic filename or base it on the first processed file?
-    # Using a generic name for simplicity
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     download_filename = f"merged_qna_headlines_{timestamp}.docx"
 
     st.download_button(
-        label="⬇️ Download Merged File", # Updated Label
+        label="⬇️ Download Merged File",
         data=st.session_state.merged_processed_file,
         file_name=download_filename,
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
 
-
 # --- Footer/Info ---
 st.markdown("---")
-st.info("This application makes calls to the Google AI API. Usage costs and rate limits may apply.")
+# Intentionally removing the API cost warning as it's less direct now
+# st.info("This application makes calls to the Google AI API. Usage costs and rate limits may apply.")
 
