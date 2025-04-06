@@ -4,6 +4,7 @@ import streamlit as st
 import backend # Import the backend functions (qna_backend_v6)
 import os
 from datetime import datetime
+import traceback # Import traceback for better error logging
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -13,8 +14,6 @@ st.set_page_config(
 )
 
 # --- Default Prompt Template ---
-# Moved from backend so it can be displayed and edited in the UI
-# Uses .format() style placeholders
 DEFAULT_PROMPT_TEMPLATE = """السؤال التالي وإجابته مقتبسان من وثيقة. قم بإنشاء عنوان قصير ومناسب باللغة العربية يلخص الموضوع الرئيسي لهذا السؤال والإجابة. اجعل العنوان موجزًا وواضحًا. لا تقم بتضمين الكلمات "سؤال" أو "إجابة" في العنوان.
 
 السؤال:
@@ -30,7 +29,6 @@ if 'merged_processed_file' not in st.session_state:
     st.session_state.merged_processed_file = None
 if 'processed_filenames' not in st.session_state:
     st.session_state.processed_filenames = []
-# Initialize prompt in session state if it doesn't exist
 if 'current_prompt_template' not in st.session_state:
     st.session_state.current_prompt_template = DEFAULT_PROMPT_TEMPLATE
 
@@ -46,12 +44,11 @@ with st.sidebar:
     )
 
     # Model Selection
-    # Add more models here if available and compatible with the API key/task
-    available_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'] # Example list
+    available_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
     selected_model = st.selectbox(
         "🤖 Select Gemini Model:",
         options=available_models,
-        index=0, # Default to the first model in the list
+        index=0,
         help="Choose the AI model for generating headlines."
     )
 
@@ -61,18 +58,16 @@ with st.sidebar:
     Edit the prompt used to instruct the AI. Use `{question}` and `{answer}` as placeholders for the actual content.
     """, help="The text below will be sent to the AI, with the placeholders replaced by the actual question and answer from your document.")
 
-    # Use session state to store and retrieve the current prompt
     edited_prompt = st.text_area(
         "Prompt:",
         value=st.session_state.current_prompt_template,
-        height=300 # Adjust height as needed
+        height=300
     )
-    # Update session state when the text area changes
     st.session_state.current_prompt_template = edited_prompt
 
     if st.button("Reset Prompt to Default"):
         st.session_state.current_prompt_template = DEFAULT_PROMPT_TEMPLATE
-        st.rerun() # Rerun to update the text area display
+        st.rerun()
 
 # --- Main Page Interface ---
 st.title("✨ Automatic Q&A Headline Generator ✨")
@@ -88,7 +83,6 @@ The application will process each file using your settings and merge the results
 """)
 
 # --- File Upload ---
-# Disable upload if API key is missing
 file_uploader_disabled = not bool(api_key)
 if not api_key:
     st.warning("Please enter your Google AI API Key in the sidebar to enable file upload.")
@@ -98,143 +92,149 @@ uploaded_files = st.file_uploader(
     type=["docx"],
     accept_multiple_files=True,
     disabled=file_uploader_disabled,
-    key="file_uploader" # Add a key for potential state management if needed
+    key="file_uploader"
 )
 
 # --- Processing Logic ---
-if uploaded_files and api_key: # Check if list is not empty and key provided
+if uploaded_files and api_key:
     st.success(f"{len(uploaded_files)} file(s) selected.")
     st.session_state.processed_filenames = [f.name for f in uploaded_files]
 
     if st.button(f"🚀 Process {len(uploaded_files)} File(s) and Merge"):
-        st.session_state.merged_processed_file = None # Reset download state
-        processed_docs_list = []
-        files_processed_count = 0
-        files_error_count = 0
-        total_files = len(uploaded_files)
-        overall_progress = st.progress(0)
-        status_messages = st.container()
 
-        # Configure Gemini API once (using key from sidebar)
-        api_key_configured = backend.configure_gemini(api_key)
-        if not api_key_configured:
-            st.error("Failed to configure the Gemini API with the provided key. Please check the key in the sidebar.")
-            st.stop()
+        # --- Placeholders for Download Button and Status ---
+        # Define placeholders *before* starting the process
+        download_placeholder = st.empty()
+        processing_status_placeholder = st.empty()
 
-        # Get current prompt from session state (edited via sidebar)
-        current_prompt = st.session_state.current_prompt_template
-        # Get selected model from sidebar widget state
-        current_model = selected_model
+        # --- Start Processing within the Status Placeholder ---
+        with processing_status_placeholder.container():
+            st.session_state.merged_processed_file = None # Reset state
+            processed_docs_list = []
+            files_processed_count = 0
+            files_error_count = 0
+            total_files = len(uploaded_files)
+            overall_progress = st.progress(0) # Progress bar inside the container
 
-        status_messages.info(f"Using Model: `{current_model}`")
+            # Configure Gemini API
+            api_key_configured = backend.configure_gemini(api_key)
+            if not api_key_configured:
+                st.error("Failed to configure the Gemini API with the provided key. Please check the key in the sidebar.")
+                st.stop() # Stop if API key fails
 
-        # Process each file
-        for i, uploaded_file in enumerate(uploaded_files):
-            file_name = uploaded_file.name
-            status_messages.info(f"Processing file {i+1}/{total_files}: {file_name}...")
-            error_occured_this_file = False
-            qna_pairs_with_headlines = []
-            modified_doc_object = None
+            # Get current settings from sidebar/session state
+            current_prompt = st.session_state.current_prompt_template
+            current_model = selected_model
+            st.info(f"Using Model: `{current_model}`") # Show model info
 
-            try:
-                # 1. Parse
-                qna_pairs, original_paragraphs = backend.parse_qna_pairs(uploaded_file)
-                if not qna_pairs:
-                    status_messages.warning(f"File '{file_name}': Could not find Q&A pairs starting with 'السؤال'/'الجواب'. Skipping headline generation.")
-                    error_occured_this_file = True
-                else:
-                    status_messages.write(f"File '{file_name}': Found {len(qna_pairs)} potential Q&A pair(s). Generating headlines...")
+            # --- Process each file ---
+            for i, uploaded_file in enumerate(uploaded_files):
+                file_name = uploaded_file.name
+                st.info(f"Processing file {i+1}/{total_files}: {file_name}...") # Status update
+                error_occured_this_file = False
+                qna_pairs_with_headlines = []
+                modified_doc_object = None
 
-                # 2. Generate headlines (pass model and prompt)
-                if not error_occured_this_file:
-                    headlines_generated_this_file = 0
-                    total_pairs_this_file = len(qna_pairs)
-                    for pair_idx, pair in enumerate(qna_pairs):
-                        # Call backend with selected model and current prompt
-                        headline = backend.generate_headline(
-                            pair['question'],
-                            pair['answer'],
-                            model_name=current_model,
-                            prompt_template=current_prompt
-                        )
-                        # Check if headline indicates an error (starts with 'خطأ')
-                        if "خطأ" not in headline:
-                            pair['headline'] = headline
-                            qna_pairs_with_headlines.append(pair)
-                            headlines_generated_this_file += 1
-                        else:
-                            # Display the specific error message returned by the backend
-                            status_messages.warning(f"File '{file_name}', Q starting '{pair['question'][:30]}...': {headline}")
-
-                    # Report summary for the file
-                    if headlines_generated_this_file == 0 and total_pairs_this_file > 0:
-                         status_messages.warning(f"File '{file_name}': No headlines generated successfully.")
-                    elif headlines_generated_this_file < total_pairs_this_file:
-                         status_messages.write(f"File '{file_name}': Generated {headlines_generated_this_file}/{total_pairs_this_file} headlines.")
+                try:
+                    # 1. Parse
+                    qna_pairs, original_paragraphs = backend.parse_qna_pairs(uploaded_file)
+                    if not qna_pairs:
+                        st.warning(f"File '{file_name}': Could not find Q&A pairs starting with 'السؤال'/'الجواب'. Skipping headline generation.")
+                        error_occured_this_file = True
                     else:
-                         status_messages.write(f"File '{file_name}': Generated {headlines_generated_this_file} headlines successfully.")
+                        st.write(f"File '{file_name}': Found {len(qna_pairs)} potential Q&A pair(s). Generating headlines...")
 
+                    # 2. Generate headlines
+                    if not error_occured_this_file:
+                        headlines_generated_this_file = 0
+                        total_pairs_this_file = len(qna_pairs)
+                        for pair_idx, pair in enumerate(qna_pairs):
+                            headline = backend.generate_headline(
+                                pair['question'], pair['answer'],
+                                model_name=current_model, prompt_template=current_prompt
+                            )
+                            if "خطأ" not in headline: # Check for backend error string
+                                pair['headline'] = headline
+                                qna_pairs_with_headlines.append(pair)
+                                headlines_generated_this_file += 1
+                            else:
+                                st.warning(f"File '{file_name}', Q starting '{pair['question'][:30]}...': {headline}") # Display specific error
 
-                # 3. Create modified doc object (pass pairs that got headlines)
-                if qna_pairs_with_headlines: # Only create if some headlines were successful
-                    modified_doc_object = backend.create_modified_document(original_paragraphs, qna_pairs_with_headlines)
-                    if modified_doc_object is None:
-                         status_messages.error(f"File '{file_name}': Failed to create the modified document structure.")
-                         error_occured_this_file = True # Mark as error if creation fails
-                elif not error_occured_this_file and qna_pairs: # Pairs found but no headlines generated
-                     status_messages.warning(f"File '{file_name}': No headlines generated, cannot create modified content section.")
-                     error_occured_this_file = True # Treat as error for merging modified content
+                        # Report summary
+                        if headlines_generated_this_file == 0 and total_pairs_this_file > 0:
+                             st.warning(f"File '{file_name}': No headlines generated successfully.")
+                        elif headlines_generated_this_file < total_pairs_this_file:
+                             st.write(f"File '{file_name}': Generated {headlines_generated_this_file}/{total_pairs_this_file} headlines.")
+                        # No need for success message here, covered by overall summary later
 
+                    # 3. Create modified doc object
+                    if qna_pairs_with_headlines:
+                        modified_doc_object = backend.create_modified_document(original_paragraphs, qna_pairs_with_headlines)
+                        if modified_doc_object is None:
+                             st.error(f"File '{file_name}': Failed to create the modified document structure.")
+                             error_occured_this_file = True
+                    elif not error_occured_this_file and qna_pairs:
+                         st.warning(f"File '{file_name}': No headlines generated, cannot create modified content section.")
+                         error_occured_this_file = True
 
-            except Exception as e_proc:
-                status_messages.error(f"Critical error processing file '{file_name}': {e_proc}")
-                import traceback
-                traceback.print_exc()
-                error_occured_this_file = True
+                except Exception as e_proc:
+                    st.error(f"Critical error processing file '{file_name}': {e_proc}")
+                    traceback.print_exc() # Log detailed error
+                    error_occured_this_file = True
 
-            # Add successfully processed document object to list
-            if not error_occured_this_file and modified_doc_object:
-                processed_docs_list.append(modified_doc_object)
-                files_processed_count += 1
-            elif not modified_doc_object: # Covers parsing errors or headline generation failures leading to no doc obj
-                files_error_count += 1
+                # Add successfully processed doc object
+                if not error_occured_this_file and modified_doc_object:
+                    processed_docs_list.append(modified_doc_object)
+                    files_processed_count += 1
+                elif not modified_doc_object:
+                    files_error_count += 1
 
-            overall_progress.progress((i + 1) / total_files)
+                # Update progress bar
+                overall_progress.progress((i + 1) / total_files)
 
-        overall_progress.empty()
+            # --- End of File Loop ---
+            overall_progress.empty() # Remove progress bar after loop
 
-        # 4. Merge documents if any were successful
-        if processed_docs_list:
-            status_messages.info(f"Merging content from {files_processed_count} successfully processed file(s)...")
-            try:
-                merged_doc = backend.merge_documents(processed_docs_list)
-                st.session_state.merged_processed_file = backend.save_doc_to_bytes(merged_doc)
-                st.success(f"Processing complete! Merged content from {files_processed_count} file(s).")
-                if files_error_count > 0:
-                     st.warning(f"{files_error_count} file(s) encountered errors or had no content to merge.")
-                st.balloons()
-            except Exception as e_merge:
-                st.error(f"Error merging documents: {e_merge}")
+            # --- Merging ---
+            if processed_docs_list:
+                st.info(f"Merging content from {files_processed_count} successfully processed file(s)...")
+                try:
+                    merged_doc = backend.merge_documents(processed_docs_list)
+                    # Store result in session state BEFORE populating download button
+                    st.session_state.merged_processed_file = backend.save_doc_to_bytes(merged_doc)
+                    st.success(f"Processing complete! Merged content from {files_processed_count} file(s).")
+                    if files_error_count > 0:
+                         st.warning(f"{files_error_count} file(s) encountered errors or had no content to merge.")
+                except Exception as e_merge:
+                    st.error(f"Error merging documents: {e_merge}")
+                    traceback.print_exc()
+                    st.session_state.merged_processed_file = None
+            else:
+                st.error("No files were processed successfully. Cannot create a merged document.")
                 st.session_state.merged_processed_file = None
-        else:
-            st.error("No files were processed successfully. Cannot create a merged document.")
-            st.session_state.merged_processed_file = None
 
+        # --- End of processing within the status placeholder ---
 
-# --- Download Button ---
-if st.session_state.merged_processed_file is not None:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    download_filename = f"merged_qna_headlines_{timestamp}.docx"
+        # --- Populate Download Button Placeholder (AFTER processing) ---
+        # This code runs *after* the 'with processing_status_placeholder.container():' block finishes
+        if st.session_state.merged_processed_file is not None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            download_filename = f"merged_qna_headlines_{timestamp}.docx"
 
-    st.download_button(
-        label="⬇️ Download Merged File",
-        data=st.session_state.merged_processed_file,
-        file_name=download_filename,
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    )
+            # Use the placeholder created *before* the processing block
+            with download_placeholder.container():
+                st.download_button(
+                    label="⬇️ Download Merged File",
+                    data=st.session_state.merged_processed_file,
+                    file_name=download_filename,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key="download_button" # Unique key for the button
+                )
+                st.balloons() # Show balloons on success near download button
+            # Optional: Clear the status messages now that download is ready
+            # processing_status_placeholder.empty()
+
 
 # --- Footer/Info ---
 st.markdown("---")
-# Intentionally removing the API cost warning as it's less direct now
-# st.info("This application makes calls to the Google AI API. Usage costs and rate limits may apply.")
 
