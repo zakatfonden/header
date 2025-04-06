@@ -19,13 +19,13 @@ Enter your Google AI API Key below, upload your file, and click the process butt
 The application will automatically generate a headline (in Arabic) for each question-answer pair and insert it into the document.
 
 **Expected File Format:**
-* The app primarily looks for paragraphs starting with the word **`سؤال`** (or `Question`) to identify questions.
-* It looks for paragraphs starting with the word **`جواب`** (or `Answer`) to identify answers.
+* The app primarily looks for paragraphs starting with the word **`السؤال`** (or `سؤال`, `Question`) to identify questions.
+* It looks for paragraphs starting with the word **`الجواب`** (or `جواب`, `Answer`) to identify answers.
     *(Variations in spacing/punctuation after these words are usually handled)*.
 * Paragraphs following a question marker (before an answer marker) are assumed to be part of the question.
 * Paragraphs following an answer marker (before the next question marker) are assumed to be part of the answer.
-* **Important:** If these keywords are missing, the app might not correctly identify all Q&A pairs. It cannot reliably understand the structure without these common markers.
-""") # English Instructions Updated
+* **Important:** If these keywords are missing, the app might not correctly identify all Q&A pairs.
+""") # English Instructions Updated for 'ال'
 
 # --- API Key Input ---
 api_key = st.text_input(
@@ -70,10 +70,11 @@ if uploaded_file is not None and api_key:
         with st.spinner("Analyzing document and calling AI... This may take a moment."):
             # 1. Parse the document using the updated backend logic
             try:
+                # Use the updated backend.py (qna_backend_v4)
                 qna_pairs, original_paragraphs = backend.parse_qna_pairs(uploaded_file)
                 if not qna_pairs:
-                    # Updated warning message
-                    st.warning("Could not find Q&A pairs starting with 'سؤال'/'Question' or 'جواب'/'Answer'. Please check the file format.")
+                    # Updated warning message reflects new keywords
+                    st.warning("Could not find Q&A pairs starting with 'السؤال'/'سؤال' or 'الجواب'/'جواب'. Please check the file format.")
                     error_occured = True
                 else:
                     st.info(f"Found {len(qna_pairs)} potential Q&A pair(s) based on keywords.")
@@ -90,6 +91,7 @@ if uploaded_file is not None and api_key:
 
                 for i, pair in enumerate(qna_pairs):
                     try:
+                        # Use the backend.py (qna_backend_v4) headline generation
                         headline = backend.generate_headline(pair['question'], pair['answer'])
                         if headline and not headline.startswith("خطأ"):
                             pair['headline'] = headline
@@ -106,20 +108,19 @@ if uploaded_file is not None and api_key:
 
                 if headlines_generated == 0 and total_pairs > 0:
                     st.error("No headlines were generated successfully. There might be an issue connecting to the Gemini API.")
-                    error_occured = True # Mark error if no headlines generated
+                    error_occured = True
                 elif headlines_generated < total_pairs:
                     st.warning(f"Successfully generated {headlines_generated} headlines out of {total_pairs} pairs found.")
                 elif total_pairs == 0:
-                     # This case should be caught by the initial parsing warning
                      pass
                 else:
                     st.success(f"Successfully generated {headlines_generated} headlines!")
 
 
             # 3. Create the modified document only if headlines were generated successfully
-            # Check specifically if qna_pairs_with_headlines has content
             if not error_occured and qna_pairs_with_headlines:
                  try:
+                     # Use the backend.py (qna_backend_v4) document creation
                      modified_doc = backend.create_modified_document(original_paragraphs, qna_pairs_with_headlines)
                      st.session_state.processed_file = backend.save_doc_to_bytes(modified_doc)
                      st.balloons()
@@ -128,14 +129,15 @@ if uploaded_file is not None and api_key:
                      error_occured = True
                      st.session_state.processed_file = None
 
-            elif not qna_pairs_with_headlines and not error_occured and qna_pairs: # Check if parsing found pairs but none got headlines
+            elif not qna_pairs_with_headlines and not error_occured and qna_pairs:
                 st.error("No headlines were successfully generated. Cannot create the modified file.")
                 st.session_state.processed_file = None
-            elif not qna_pairs: # Handles case where parsing found nothing initially
-                 st.session_state.processed_file = None # Ensure no download button
+            elif not qna_pairs:
+                 st.session_state.processed_file = None
 
 
 # --- Download Button ---
+# (Code remains the same as qna_app_v4)
 if st.session_state.processed_file is not None:
     original_name = st.session_state.original_filename or "document"
     base_name = os.path.splitext(original_name)[0]
@@ -153,5 +155,6 @@ elif api_key and uploaded_file is not None and not st.session_state.processed_fi
 
 
 # --- Footer/Info ---
+# (Code remains the same as qna_app_v4)
 st.markdown("---")
 st.info("This application makes calls to the Google AI API. Usage costs and rate limits may apply.")
