@@ -20,8 +20,8 @@ def configure_gemini(api_key):
 
 def parse_qna_pairs(docx_file):
     """
-    Parses a DOCX file to extract Q&A pairs based on specific markers.
-    Assumes questions start with 'س:' or 'Q:' and answers start with 'ج:' or 'A:'.
+    Parses a DOCX file to extract Q&A pairs based on specific keywords.
+    Primarily looks for paragraphs starting with 'سؤال'/'Question' or 'جواب'/'Answer'.
     Handles Arabic text.
 
     Args:
@@ -37,19 +37,23 @@ def parse_qna_pairs(docx_file):
     current_q = None
     current_a = []
     q_start_index = -1
+    is_parsing_answer = False # Flag to know if we are currently collecting answer paragraphs
 
     try:
         document = docx.Document(docx_file)
         all_paragraphs = document.paragraphs
 
-        # Define regex patterns for flexibility (handles whitespace)
-        # Case-insensitive matching for Q/A if needed using re.IGNORECASE
-        # Using r'\s*' to match zero or more whitespace characters
-        q_pattern = re.compile(r"^\s*(?:س|Q)\s*[:.)]", re.IGNORECASE) # Starts with س: or Q: or Q. or س. etc.
-        a_pattern = re.compile(r"^\s*(?:ج|A)\s*[:.)]", re.IGNORECASE) # Starts with ج: or A: or A. or ج. etc.
+        # Define regex patterns for flexibility (handles whitespace, optional punctuation)
+        # Using \b for word boundary to avoid matching parts of words. Case-insensitive.
+        # Allows for optional : . ) after the keyword
+        q_pattern = re.compile(r"^\s*(?:سؤال|Question)\b\s*[:.)]?\s*", re.IGNORECASE)
+        a_pattern = re.compile(r"^\s*(?:جواب|Answer)\b\s*[:.)]?\s*", re.IGNORECASE)
 
         for i, para in enumerate(all_paragraphs):
             text = para.text.strip()
+            # Skip empty paragraphs for detection logic
+            if not text:
+                continue
 
             is_question_start = q_pattern.match(text)
             is_answer_start = a_pattern.match(text)
@@ -62,42 +66,53 @@ def parse_qna_pairs(docx_file):
                         "answer": "\n".join(current_a).strip(),
                         "q_para_index": q_start_index
                     })
-                    current_a = [] # Reset answer
+                elif current_q and not current_a:
+                     # Handle case where a question was found but no answer followed before the next question
+                     print(f"Warning: Question starting at index {q_start_index} ('{current_q[:50]}...') seems to have no corresponding answer before the next question.")
+                     # Optionally add it with an empty answer:
+                     # qna_pairs.append({"question": current_q.strip(), "answer": "", "q_para_index": q_start_index})
+
 
                 # Start the new question
-                # Remove the marker (e.g., "س:") from the question text itself
+                # Remove the marker (e.g., "سؤال:") from the question text itself
                 current_q = q_pattern.sub('', text).strip()
                 q_start_index = i
-                current_a = [] # Ensure answer list is reset even if previous one was empty
+                current_a = [] # Reset answer
+                is_parsing_answer = False # We are now parsing the question part
 
             elif is_answer_start and current_q:
-                # Start or continue the answer only if we have a current question
-                # Remove the marker (e.g., "ج:") from the answer text
+                # Start the answer only if we have a current question active
+                # Remove the marker (e.g., "جواب:") from the answer text
                 answer_text = a_pattern.sub('', text).strip()
                 if answer_text: # Only add non-empty answer parts
                     current_a.append(answer_text)
+                is_parsing_answer = True # We are now parsing the answer part
 
-            elif current_q and not is_question_start:
-                 # If we are in a Q&A block (current_q is not None)
-                 # and it's not a new question start, append to the current part
-                 # (either continuation of Q or A)
-                 # This simplistic approach assumes multi-paragraph answers follow directly
-                 # If question could be multi-paragraph before answer starts, this needs refinement
-                 if current_a: # If we've already started the answer, append to answer
-                    if text: current_a.append(text)
-                 else: # Otherwise, assume it's part of the question (needs careful review of format)
-                    # Check if the line seems like a continuation or just unrelated text
-                    # For now, appending to question if answer hasn't started
+            elif current_q: # If we have an active question...
+                 # And it's not the start of a new Q or A...
+                 if is_parsing_answer:
+                     # If we've already started the answer, append to answer
+                     if text: current_a.append(text)
+                 else:
+                     # If we haven't started the answer yet, append to the question
                      if text: current_q += "\n" + text
 
+            # else: Paragraph is before the first question or doesn't seem related, ignore for Q&A pairing.
 
-        # Add the last Q&A pair if it exists
+
+        # Add the last Q&A pair if it exists and has an answer
         if current_q and current_a:
             qna_pairs.append({
                 "question": current_q.strip(),
                 "answer": "\n".join(current_a).strip(),
                 "q_para_index": q_start_index
             })
+        elif current_q and not current_a:
+             # Handle the very last question potentially having no answer in the doc
+             print(f"Warning: The last question found ('{current_q[:50]}...') appears to have no corresponding answer.")
+             # Optionally add it with an empty answer:
+             # qna_pairs.append({"question": current_q.strip(), "answer": "", "q_para_index": q_start_index})
+
 
         return qna_pairs, all_paragraphs
 
@@ -106,12 +121,12 @@ def parse_qna_pairs(docx_file):
         # Consider raising the error or returning a specific error indicator
         return [], [] # Return empty lists on error
 
+# --- Headline Generation (No changes needed here) ---
 
-# --- Headline Generation ---
-
-def generate_headline(question, answer, model_name="gemini-1.5-flash"): # Or use a different model like gemini-pro
+def generate_headline(question, answer, model_name="gemini-1.5-flash"):
     """
     Generates a headline for a given Q&A pair using the Gemini API.
+    (Kept the Arabic prompt as document content is Arabic)
 
     Args:
         question (str): The question text (Arabic).
@@ -136,23 +151,20 @@ def generate_headline(question, answer, model_name="gemini-1.5-flash"): # Or use
     try:
         model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
-        # Basic check if response has text
         if response.text:
-             # Clean up potential markdown or extra formatting from the model
             headline = response.text.strip().replace('*', '').replace('#', '')
             return headline
         else:
-             # Handle cases where the response might be blocked or empty
             print(f"Warning: Received empty or blocked response for Q: {question[:50]}...")
-            # Consider checking response.prompt_feedback for block reasons
+            # Check response.prompt_feedback for block reasons if needed
             return f"خطأ في إنشاء عنوان للسؤال: {question[:30]}..." # Placeholder error headline
 
     except Exception as e:
         print(f"Error generating headline with Gemini: {e}")
-        # Consider more specific error handling based on potential API errors
         return f"خطأ في إنشاء عنوان للسؤال: {question[:30]}..." # Placeholder error headline
 
-# --- Document Creation ---
+
+# --- Document Creation (No changes needed here) ---
 
 def create_modified_document(original_paragraphs, qna_pairs_with_headlines):
     """
@@ -166,88 +178,69 @@ def create_modified_document(original_paragraphs, qna_pairs_with_headlines):
         docx.Document: The new document object with headlines.
     """
     new_document = docx.Document()
-    # Set default paragraph direction to RTL for Arabic
     style = new_document.styles['Normal']
     font = style.font
-    # Consider setting an Arabic font if default isn't suitable
-    # font.name = 'Arial' # Example, choose appropriate Arabic font if needed
     paragraph_format = style.paragraph_format
-    paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT # Right align paragraphs
+    paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
 
-    # Create a lookup for quick access to headlines by question index
     headlines_map = {item['q_para_index']: item['headline'] for item in qna_pairs_with_headlines}
-
-    # Keep track of which paragraphs belong to processed Q&A pairs to avoid duplicating them
     processed_para_indices = set()
-    for item in qna_pairs_with_headlines:
+    qna_ranges = {} # Store start and end index for each Q&A pair
+
+    # Pre-calculate ranges to handle copying correctly
+    sorted_qna = sorted(qna_pairs_with_headlines, key=lambda x: x['q_para_index'])
+    for i, item in enumerate(sorted_qna):
         q_index = item['q_para_index']
-        # Find the end of the answer (approximate by finding the next Q or end of doc)
-        next_q_index = len(original_paragraphs) # Default to end of doc
-        for next_item in qna_pairs_with_headlines:
-             if next_item['q_para_index'] > q_index:
-                 next_q_index = min(next_q_index, next_item['q_para_index'])
-                 break
-        # Mark all paragraphs from the start of Q to just before the next Q as processed
-        for i in range(q_index, next_q_index):
-            processed_para_indices.add(i)
+        # Find the start of the next Q&A pair, or the end of the document
+        next_q_start_index = len(original_paragraphs)
+        if i + 1 < len(sorted_qna):
+            next_q_start_index = sorted_qna[i+1]['q_para_index']
+
+        qna_ranges[q_index] = next_q_start_index
+        for j in range(q_index, next_q_start_index):
+            processed_para_indices.add(j)
 
 
-    # Iterate through original paragraphs and build the new document
     para_index = 0
     while para_index < len(original_paragraphs):
         if para_index in headlines_map:
             # Insert headline
             headline_text = headlines_map[para_index]
             headline_para = new_document.add_paragraph()
-            # Set alignment specifically for headline if needed, otherwise uses default
             headline_para.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
             runner = headline_para.add_run(headline_text)
             runner.bold = True
-            runner.font.size = Pt(14) # Optional: make headline slightly larger
+            runner.font.size = Pt(14)
 
-            # Find the end index for this Q&A pair (as calculated before)
-            next_q_index = len(original_paragraphs)
-            for item in qna_pairs_with_headlines:
-                 # Find the item corresponding to the current headline
-                 if item['q_para_index'] == para_index:
-                     # Now find the start index of the *next* Q&A pair
-                     temp_next_q = len(original_paragraphs)
-                     for next_item in qna_pairs_with_headlines:
-                         if next_item['q_para_index'] > para_index:
-                             temp_next_q = min(temp_next_q, next_item['q_para_index'])
-                             break
-                     next_q_index = temp_next_q
-                     break # Found the correct range
+            # Get the end index for this Q&A pair
+            end_index = qna_ranges[para_index]
 
-
-            # Copy the original Q&A paragraphs
-            for i in range(para_index, next_q_index):
+            # Copy the original Q&A paragraphs for this range
+            for i in range(para_index, end_index):
                  original_para = original_paragraphs[i]
                  new_para = new_document.add_paragraph(original_para.text)
-                 # Attempt to copy basic formatting (alignment) - more complex formatting needs more code
+                 # Attempt to copy basic formatting (alignment)
                  new_para.alignment = original_para.alignment
-                 # Note: Copying detailed formatting (bold, italics within paragraph, etc.)
-                 # requires iterating through runs, which is more complex.
+                 # Note: Copying detailed formatting requires more complex run iteration.
 
             # Skip the original paragraphs that were just copied
-            para_index = next_q_index
+            para_index = end_index
 
         elif para_index not in processed_para_indices:
              # Copy paragraphs that are not part of any detected Q&A
              original_para = original_paragraphs[para_index]
              new_para = new_document.add_paragraph(original_para.text)
-             new_para.alignment = original_para.alignment # Copy basic alignment
+             new_para.alignment = original_para.alignment
              para_index += 1
         else:
             # This index was part of a processed Q&A but wasn't the start,
             # so just increment to skip it (already handled).
             para_index += 1
 
-
     return new_document
 
 
-# --- Saving Document ---
+# --- Saving Document (No changes needed here) ---
 
 def save_doc_to_bytes(document):
     """Saves the DOCX document object to a byte stream."""
